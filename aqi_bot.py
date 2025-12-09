@@ -220,6 +220,9 @@ def run_webhook_server():
         webhook_url=webhook_url
     )
 
+    # This function is the new entry point for Render.
+    pass
+
 if __name__ == '__main__':
     # When Render executes 'python aqi_bot.py', this function runs.
     run_webhook_server()
