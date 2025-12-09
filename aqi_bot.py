@@ -169,6 +169,49 @@ def init_webhook_app():
 # Export the application object for external webserver integration (like gunicorn)
 application_instance = init_webhook_app()
 
+# --- Application Initialization for Gunicorn ---
+
+# Function to build and configure the PTB Application
+def build_application():
+    """Builds and returns the PTB Application instance."""
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN is not set. Cannot build application.")
+        return None
+
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("aqi", aqi_command))
+    
+    # We do NOT run run_webhook() here. We just return the application.
+    # The actual Webhook serving logic will be handled by the Runner below.
+    return application
+
+# The Application object Gunicorn is looking for (aqi_bot:app)
+application_instance = build_application()
+
+
+# Function to handle the actual running of the webhook
+# This will be used in the Procfile/Start Command instead of gunicorn targeting 'app'.
+def run_webhook_server():
+    """Runs the webhook server using the application instance."""
+    if not application_instance:
+        logger.error("Application instance is None. Exiting.")
+        return
+
+    # Set the webhook URL (This must be the public URL provided by Render)
+    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
+
+    logger.info(f"Starting webhook server on port {PORT}. Webhook URL: {webhook_url}")
+
+    # Use the application_instance to start the webhook server
+    application_instance.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_TOKEN,
+        webhook_url=webhook_url
+    )
+    
+# We won't use 'app' directly as the WSGI callable since PTB's webhook setup is custom.
+# Instead, we will tell Render to execute the script directly.
 
 if __name__ == '__main__':
     # This block is only for local testing, not for Render
