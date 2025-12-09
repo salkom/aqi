@@ -7,8 +7,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # --- Configuration (Load from Environment Variables) ---
 # NOTE: These variables must be set on the Render dashboard
-TELEGRAM_TOKEN = os.environ.get("8575554544:AAGdIiaZei1Fjnbtvt6VVEcBQ4IlVdvVTi8")
-IQAIR_API_KEY = os.environ.get("a6dcc4d7-06a2-481b-81ca-a72132034752")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+IQAIR_API_KEY = os.environ.get("IQAIR_API_KEY")
 
 # Render environment variables
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL") # This is automatically set by Render
