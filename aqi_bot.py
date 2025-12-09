@@ -192,33 +192,35 @@ application_instance = build_application()
 # Function to handle the actual running of the webhook
 # This will be used in the Procfile/Start Command instead of gunicorn targeting 'app'.
 def run_webhook_server():
-    """Runs the webhook server using the application instance."""
-    if not application_instance:
-        logger.error("Application instance is None. Exiting.")
+    """Builds the application and starts the webhook server."""
+    
+    # Reload environment variables for safety
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+    IQAIR_API_KEY = os.environ.get("IQAIR_API_KEY")
+    WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
+    PORT = int(os.environ.get("PORT", 5000))
+
+    if not all([TELEGRAM_TOKEN, IQAIR_API_KEY, WEBHOOK_URL]):
+        # This error check will now catch the missing token and provide a clean exit
+        logger.error("Required environment variables (TELEGRAM_TOKEN, IQAIR_API_KEY, or RENDER_EXTERNAL_URL) are missing.")
         return
 
-    # Set the webhook URL (This must be the public URL provided by Render)
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("aqi", aqi_command))
+
     webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
 
     logger.info(f"Starting webhook server on port {PORT}. Webhook URL: {webhook_url}")
 
-    # Use the application_instance to start the webhook server
-    application_instance.run_webhook(
+    # This is the PTB internal server. It handles the web serving and update processing.
+    application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=TELEGRAM_TOKEN,
         webhook_url=webhook_url
     )
-    
-# We won't use 'app' directly as the WSGI callable since PTB's webhook setup is custom.
-# Instead, we will tell Render to execute the script directly.
 
 if __name__ == '__main__':
-    # This block is only for local testing, not for Render
-    print("Running Webhook bot locally. This requires a public URL service like ngrok to work.")
-    # For local Webhook testing, you'd typically set the webhook_url manually
-    # application_instance.run_webhook(...)
-    
-    # For deployment, we use the Gunicorn/Procfile approach.
-    pass
+    # When Render executes 'python aqi_bot.py', this function runs.
+    run_webhook_server()
 
