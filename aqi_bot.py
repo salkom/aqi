@@ -164,13 +164,16 @@ def start():
     # 4. Run based on environment
     if WEBHOOK_URL:
         # --- Production Mode (Render/Webhook) ---
+
+        # Add logging here, before the blocking run_webhook call
+        logger.info(f"Setting Webhook to: {WEBHOOK_URL}/{TELEGRAM_TOKEN} on port {PORT}")
+        
         # Set the webhook to the external URL
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TELEGRAM_TOKEN, # Use the token as the path for security
             webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
-            on_startup=lambda app: logger.info(f"Webhook set to {WEBHOOK_URL}/{TELEGRAM_TOKEN} on port {PORT}"),
         )
         logger.info(f"Bot started in **Webhook Mode** on port {PORT}. URL: {WEBHOOK_URL}")
     else:
