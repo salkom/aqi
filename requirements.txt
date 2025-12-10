@@ -1,4 +1,2 @@
 python-telegram-bot
 requests
-flask           # Used for the web server handling updates
-gunicorn        # The production web server
