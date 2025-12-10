@@ -2,15 +2,33 @@ import requests
 import logging
 import os
 import sys
-import asyncio 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
+import asyncio
+import functools
 from http import HTTPStatus
 from dotenv import load_dotenv
 
+from telegram import (
+    Update, 
+    ReplyKeyboardMarkup, 
+    KeyboardButton, 
+    ReplyKeyboardRemove, 
+    BotCommand, 
+    constants # For ChatAction.TYPING
+)
+from telegram.ext import (
+    ApplicationBuilder, 
+    CommandHandler, 
+    ContextTypes, 
+    MessageHandler, 
+    filters, 
+    ConversationHandler
+)
+
 # --- Configuration & Setup ---
 
-# Use Environment Variables for sensitive data and configuration
+# Load environment variables once at the top
+load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 IQAIR_API_KEY = os.getenv("IQAIR_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -20,73 +38,37 @@ PORT = int(os.getenv("PORT", "8080"))
 COUNTRY_NAME = "Uzbekistan"
 
 # Conversation States
-START_CHOOSING_STATE, CHOOSING_CITY, GETTING_AQI = range(3)
+# CHOOSING_REGION is the state where the Region Reply Keyboard (Level 2) is visible
+CHOOSING_REGION, CHOOSING_CITY = range(2) 
 
-# Define the region/city data structure for Uzbekistan
-# Note: 'state_param' should match the name IQAir expects (often the region name).
+# Define the region/city data structure
+# NOTE: 'state_param' must match the IQAir English spelling exactly.
 REGIONS_DATA = {
-    # Regions with available cities
-    "Andijon": {
-        "state_param": "Andijon", 
-        "cities": ["Andijon"]
-    },
-    "Bukhara": {
-        "state_param": "Bukhara", 
-        "cities": ["Bukhara", "Kagan"]
-    },
-    "Fergana": {
-        "state_param": "Fergana", 
-        "cities": ["Fergana", "Kirguli"]
-    },
-    "Jizzax": {
-        "state_param": "Jizzax", 
-        "cities": ["Jizzax"]
-    },
-    "Karakalpakstan": {
-        "state_param": "Karakalpakstan", 
-        "cities": ["Nukus"]
-    },
-    "Namangan": {
-        "state_param": "Namangan", 
-        "cities": ["Namangan"]
-    },
-    "Navoiy": {
-        "state_param": "Navoiy", 
-        "cities": ["Navoiy", "Zarafshan"]
-    },
-    "Samarqand": {
-        "state_param": "Samarqand", 
-        "cities": ["Samarqand"]
-    },
-    "Sirdaryo": {
-        "state_param": "Sirdaryo", 
-        "cities": ["Guliston"]
-    },
-    "Toshkent": {
+    "Andijon": { "state_param": "Andijon", "cities": ["Andijon"] },
+    "Bukhara": { "state_param": "Bukhara", "cities": ["Bukhara", "Kagan"] },
+    "Fergana": { "state_param": "Fergana", "cities": ["Fergana", "Kirguli"] },
+    "Jizzax": { "state_param": "Jizzax", "cities": ["Jizzax"] },
+    "Karakalpakstan": { "state_param": "Karakalpakstan", "cities": ["Nukus"] },
+    "Namangan": { "state_param": "Namangan", "cities": ["Namangan"] },
+    "Navoiy": { "state_param": "Navoiy", "cities": ["Navoiy", "Zarafshan"] },
+    "Samarqand": { "state_param": "Samarqand", "cities": ["Samarqand"] },
+    "Sirdaryo": { "state_param": "Sirdaryo", "cities": ["Guliston"] },
+    "Toshkent": { 
         "state_param": "Toshkent", 
-        "cities": ["Amirsoy", "Chorvoq", "G'azalkent", "Parkent", "Qibray", "Salor", "Sidzhak", "Tuytepa", "Urtaowul"]
+        "cities": ["Amirsoy", "Chorvoq", "G'azalkent", "Parkent", "Qibray", "Salor", "Sidzhak", "Tuytepa", "Urtaowul"] 
     },
-    "Toshkent Shahri": {
-        "state_param": "Toshkent Shahri",
-        "cities": ["Tashkent"]
+    "Toshkent Shahri": { 
+        "state_param": "Toshkent Shahri", 
+        "cities": ["Tashkent"] 
     },
-    "Xorazm": {
-        "state_param": "Xorazm", 
-        "cities": ["Pitnak", "Urganch"]
-    },
+    "Xorazm": { "state_param": "Xorazm", "cities": ["Pitnak", "Urganch"] },
     
-    # Regions with NO known available cities (only shows Go Back button)
-    "Qashqadaryo": {
-        "state_param": "Qashqadaryo",
-        "cities": []
-    },
-    "Surxondaryo": {
-        "state_param": "Surxondaryo",
-        "cities": []
-    },
+    # Regions with NO known available cities (now handled to show only 'Back' button)
+    "Qashqadaryo": { "state_param": "Qashqadaryo", "cities": [] },
+    "Surxondaryo": { "state_param": "Surxondaryo", "cities": [] },
 }
 
-# Basic Logging setup
+# Logging setup
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -94,29 +76,97 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --- AQI Fetching Function (UNCHANGED) ---
+# --- REPLY KEYBOARD CONFIGURATION ---
 
-def fetch_air_quality(latitude=None, longitude=None, city=None, state=None, country=COUNTRY_NAME):
-    """
-    Fetches air quality data from the IQAir API.
-    Can use coordinates (latitude/longitude) OR city/state/country.
-    """
+# Define button texts
+BUTTON_REGIONS = "🌍 Select Region"
+BUTTON_MY_LOCATION = "📍 My Location"
+BUTTON_BACK_MAIN = "⬅️ Back to Main Menu" 
+BUTTON_BACK_REGION = "⬅️ Back to Regions" 
+
+# Level 1: Main Menu Keyboard
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [BUTTON_REGIONS], 
+        [KeyboardButton(BUTTON_MY_LOCATION, request_location=True)]
+    ],
+    resize_keyboard=True,      
+    one_time_keyboard=False    
+)
+
+# Level 2: Region Selection Keyboard
+def get_region_reply_keyboard():
+    """Dynamically creates the Reply Keyboard for regions."""
+    region_names = sorted(REGIONS_DATA.keys())
+    keyboard_rows = []
+    current_row = []
+    
+    for region_name in region_names:
+        current_row.append(region_name)
+        if len(current_row) == 2: # 2 buttons per row
+            keyboard_rows.append(current_row)
+            current_row = []
+            
+    if current_row:
+        keyboard_rows.append(current_row)
+        
+    # Add the 'Back' button on the last row
+    keyboard_rows.append([BUTTON_BACK_MAIN]) 
+    
+    return ReplyKeyboardMarkup(
+        keyboard_rows,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+REGION_REPLY_KEYBOARD = get_region_reply_keyboard()
+
+# Level 3: City Selection Keyboard
+def get_city_reply_keyboard(region_name):
+    """Dynamically creates the Reply Keyboard for cities in a selected region. 
+       Always includes a 'Back to Regions' button, even if cities list is empty."""
+    cities = REGIONS_DATA.get(region_name, {}).get("cities", [])
+    keyboard_rows = []
+    current_row = []
+    
+    for city_name in cities:
+        current_row.append(city_name)
+        if len(current_row) == 2: # 2 buttons per row
+            keyboard_rows.append(current_row)
+            current_row = []
+            
+    if current_row:
+        keyboard_rows.append(current_row)
+        
+    # Always add the 'Back to Regions' button on the last row
+    keyboard_rows.append([BUTTON_BACK_REGION]) 
+    
+    return ReplyKeyboardMarkup(
+        keyboard_rows,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
+# --- AQI Fetching Logic (UNCHANGED) ---
+
+def _fetch_air_quality_sync(latitude=None, longitude=None, city=None, state=None, country=COUNTRY_NAME):
+    """Internal synchronous function to fetch data."""
     if not IQAIR_API_KEY:
         logger.error("IQAIR_API_KEY is not set.")
         return "❌ IQAir API Key is missing. Cannot fetch data."
 
     try:
+        # Determine Endpoint
         if latitude is not None and longitude is not None:
-            # Endpoint for coordinates: /v2/nearest_city
             api_endpoint = f"http://api.airvisual.com/v2/nearest_city"
-            location_name = f"Your Location (Lat: {latitude:.2f}, Lon: {longitude:.2f})"
+            location_name = f"Location (Lat: {latitude:.2f}, Lon: {longitude:.2f})"
             params = {
                 'lat': latitude,
                 'lon': longitude,
                 'key': IQAIR_API_KEY
             }
         elif city and state:
-            # Endpoint for city/state/country: /v2/city
             api_endpoint = f"http://api.airvisual.com/v2/city"
             location_name = f"{city}, {state}"
             params = {
@@ -128,37 +178,34 @@ def fetch_air_quality(latitude=None, longitude=None, city=None, state=None, coun
         else:
             return "❌ Invalid location parameters provided."
         
-        # Make the GET request to the IQAir API
+        # Make request
         response = requests.get(api_endpoint, params=params)
-        response.raise_for_status() 
+        response.raise_for_status()
         data = response.json()
         
-        # Check if the API returned an 'success' status
         if data.get('status') != 'success':
-            error_message = data.get('data', 'Unknown API error')
+            error_data = data.get('data', 'Unknown API error')
+            error_message = error_data['message'] if isinstance(error_data, dict) and 'message' in error_data else str(error_data)
             logger.error(f"IQAir API Error for {location_name}: {error_message}")
             return f"❌ Error fetching data for {location_name}: *{error_message}*"
 
-        # --- Data Extraction ---
+        # Extract Data
         city_data = data['data']
         current_data = city_data['current']
         
-        # Update location name from API response for the nearest_city command
+        # If coordinates were used, get the actual city name found
         if latitude is not None:
-            city_name_from_api = city_data.get('city', 'Unknown City')
-            state_name_from_api = city_data.get('state', '')
-            location_name = f"Closest City: {city_name_from_api}, {state_name_from_api}"
+            location_name = f"{city_data.get('city', 'Unknown City')}, {city_data.get('state', '')}"
         
         aqi_us = current_data['pollution']['aqius']
         main_pollutant = current_data['pollution']['mainus']
         temperature = current_data['weather']['tp']
         
-        # Determine air quality description based on US AQI standard
         quality_info = get_aqi_description(aqi_us)
         
-        # Format the final output message
+        # Format Message
         message = (
-            f"**{location_name} Air Quality Report** 💨\n\n"
+            f"**{location_name} Air Quality** 💨\n\n"
             f"**Current AQI (US):** {aqi_us} - {quality_info['level']}\n"
             f"**Main Pollutant:** {main_pollutant}\n"
             f"**Temperature:** {temperature}°C\n\n"
@@ -170,270 +217,256 @@ def fetch_air_quality(latitude=None, longitude=None, city=None, state=None, coun
         logger.error(f"HTTP Request Failed: {e}")
         return "❌ Network or API communication error."
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
-        return "❌ An internal error occurred while processing the data."
+        logger.error(f"Unexpected error: {e}")
+        return "❌ An internal error occurred."
 
-# --- AQI Description Logic (US Standard) (UNCHANGED) ---
+async def fetch_air_quality(latitude=None, longitude=None, city=None, state=None, country=COUNTRY_NAME):
+    """Async wrapper that runs the synchronous _fetch_air_quality_sync in a separate thread."""
+    loop = asyncio.get_running_loop()
+    func = functools.partial(
+        _fetch_air_quality_sync, 
+        latitude=latitude, longitude=longitude, city=city, state=state, country=country
+    )
+    return await loop.run_in_executor(None, func)
+
 def get_aqi_description(aqi):
-    """Returns a dictionary with the AQI level and a health message."""
+    """Returns AQI level and health message."""
     if 0 <= aqi <= 50:
-        return {'level': '🟢 Good', 'message': 'Air quality is considered satisfactory; little or no risk.'}
+        return {'level': '🟢 Good', 'message': 'Air quality is satisfactory.'}
     elif 51 <= aqi <= 100:
-        return {'level': '🟡 Moderate', 'message': 'Air quality is acceptable; sensitive individuals should consider limiting outdoor activity.'}
+        return {'level': '🟡 Moderate', 'message': 'Sensitive individuals should limit outdoor activity.'}
     elif 101 <= aqi <= 150:
-        return {'level': '🟠 Unhealthy for Sensitive Groups', 'message': 'Members of sensitive groups may experience health effects. General public not likely to be affected.'}
+        return {'level': '🟠 Unhealthy for Sensitive Groups', 'message': 'Sensitive groups may experience health effects.'}
     elif 151 <= aqi <= 200:
-        return {'level': '🔴 Unhealthy', 'message': 'Everyone may begin to experience health effects; sensitive groups should limit time outdoors.'}
+        return {'level': '🔴 Unhealthy', 'message': 'Everyone may begin to experience health effects.'}
     elif 201 <= aqi <= 300:
-        return {'level': '🟣 Very Unhealthy', 'message': 'Health warnings of emergency conditions. The entire population is more likely to be affected.'}
-    else: # 301+
-        return {'level': '🟤 Hazardous', 'message': 'Health alert: everyone should avoid all outdoor exertion.'}
+        return {'level': '🟣 Very Unhealthy', 'message': 'Health warnings of emergency conditions.'}
+    else:
+        return {'level': '🟤 Hazardous', 'message': 'Health alert: avoid all outdoor exertion.'}
 
 
-# --- CONVERSATION HANDLERS (MODIFIED select_city) ---
+# --- CONVERSATION HANDLERS ---
 
-async def select_region(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Sends a message with inline buttons to choose a region, or handles 'Go Back'."""
+async def start_region_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Level 1 -> Level 2 Transition: Displays the Region Reply Keyboard."""
     
-    if update.message:
-        send_func = update.message.reply_text
-    elif update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        send_func = query.edit_message_text
-
-    keyboard = []
-    for region_name in sorted(REGIONS_DATA.keys()): # Sort for alphabetical order
-        callback_data = f"state:{region_name}"
-        keyboard.append([InlineKeyboardButton(region_name, callback_data=callback_data)])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.message:
-        await send_func(
-            "🗺️ Please choose a region in Uzbekistan:",
-            reply_markup=reply_markup
-        )
-    elif update.callback_query:
-        await send_func(
-            "🗺️ Please choose a region in Uzbekistan:",
-            reply_markup=reply_markup
-        )
+    # Send the Region Reply Keyboard (Level 2)
+    await update.message.reply_text(
+        "🗺️ Please choose a region:",
+        reply_markup=REGION_REPLY_KEYBOARD
+    )
         
-    return CHOOSING_CITY
+    # The next state waits for a region NAME as text
+    return CHOOSING_REGION
 
 async def select_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Processes the chosen region and sends a list of cities or just Go Back button."""
-    query = update.callback_query
-    await query.answer()
+    """
+    Level 2 -> Level 3 Transition: 
+    Receives the Region NAME (text) and displays the City Reply Keyboard.
+    """
     
-    region_name = query.data.split(":")[1]
+    region_name = update.message.text
     
-    # Store the region's state_param for later use
+    # 1. Handle the 'Back to Main' button
+    if region_name == BUTTON_BACK_MAIN:
+        # Jump back to start_command to reset the keyboard to Level 1
+        await update.message.reply_text("Main menu restored.", reply_markup=MAIN_KEYBOARD)
+        context.user_data.clear()
+        return ConversationHandler.END 
+        
+    if region_name not in REGIONS_DATA:
+        await update.message.reply_text(
+            "❌ Invalid region. Please choose a button from the keyboard below.",
+            reply_markup=REGION_REPLY_KEYBOARD # Restore Level 2 Keyboard
+        )
+        return CHOOSING_REGION
+
+    # Save data for the next step
     state_param = REGIONS_DATA[region_name]["state_param"]
     context.user_data['selected_state_param'] = state_param
+    context.user_data['selected_region_name'] = region_name 
     
-    cities = REGIONS_DATA[region_name]["cities"]
-    keyboard = []
+    # Generate and send the City Reply Keyboard (Level 3)
+    # This automatically handles regions with no cities (only 'Back' button will appear)
+    city_keyboard = get_city_reply_keyboard(region_name)
     
-    # --- NEW CONDITIONAL LOGIC ---
-    if cities:
-        # Region HAS cities, build city buttons
-        for city_name in cities:
-            callback_data = f"city:{city_name}"
-            keyboard.append([InlineKeyboardButton(city_name, callback_data=callback_data)])
-        
-        message_text = f"🏙️ Now choose a city in {region_name}:"
-        
-        # The next state is GETTING_AQI
-        next_state = GETTING_AQI
-    else:
-        # Region has NO cities, show only an informational message
-        message_text = f"⚠️ Unfortunately, we do not have AQI monitoring stations listed for any city in **{region_name}**. Please choose a different region."
-        
-        # The next state remains GETTING_AQI to process the 'Go Back' button
-        next_state = GETTING_AQI
+    cities_message = "🏙️ Now choose a city in **{region_name}**:"
+    if not REGIONS_DATA[region_name]["cities"]:
+        cities_message = f"⚠️ No monitoring stations listed for **{region_name}**. Use the back button."
 
-    # Add Go Back button regardless of city list presence
-    keyboard.append([InlineKeyboardButton("⬅️ Go Back", callback_data="go_back_to_regions")]) 
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        message_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown' # Use Markdown for the bold warning text
+    await update.message.reply_text(
+        cities_message.format(region_name=region_name), 
+        reply_markup=city_keyboard,
+        parse_mode='Markdown'
     )
     
-    return next_state # Move to the final state
+    # The next state waits for a city NAME as text
+    return CHOOSING_CITY
 
-async def get_city_aqi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Processes the chosen city, the 'Go Back' action, or outputs the AQI report."""
-    query = update.callback_query
-    await query.answer()
+async def get_aqi_by_city_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Level 3 -> Data Fetch: 
+    Receives the City NAME (text) and fetches data, then resets to Level 1.
+    """
+    city_name = update.message.text
     
-    # Check for the 'Go Back' action first
-    if query.data == 'go_back_to_regions':
-        return await select_region(update, context)
+    # 1. Handle the 'Back to Regions' button
+    if city_name == BUTTON_BACK_REGION:
+        # Redisplay the region selection keyboard (Level 2)
+        await update.message.reply_text("Returning to region selection...", reply_markup=REGION_REPLY_KEYBOARD)
+        return CHOOSING_REGION 
         
-    # --- Proceed with AQI Fetching ---
-    city_name = query.data.split(":")[1]
     state_param = context.user_data.get('selected_state_param')
+    region_name = context.user_data.get('selected_region_name')
     
-    if not state_param:
-        await query.edit_message_text("❌ Error: State data lost. Please start again with /regions.")
-        return ConversationHandler.END
+    # Basic validation (Check if the city name is one of the valid cities for the region)
+    if not state_param or city_name not in REGIONS_DATA.get(region_name, {}).get('cities', []):
+        await update.message.reply_text(
+            "❌ Invalid city selection. Please use the buttons.", 
+            reply_markup=get_city_reply_keyboard(region_name)
+        )
+        return CHOOSING_CITY
 
-    await query.edit_message_text(f"Fetching AQI for {city_name}...")
+    # UX: Show typing status and remove the Level 3 keyboard
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
+    await update.message.reply_text(f"🔎 Fetching AQI for **{city_name}**...", 
+                                    parse_mode='Markdown', 
+                                    reply_markup=ReplyKeyboardRemove())
 
-    # Fetch data using city/state parameters
-    report_message = fetch_air_quality(
+    # Call the ASYNC wrapper
+    report_message = await fetch_air_quality(
         city=city_name, 
         state=state_param, 
         country=COUNTRY_NAME
     )
     
-    await query.edit_message_text(report_message, parse_mode='Markdown')
+    await update.message.reply_markdown(report_message)
     
-    # Clear user data and end the conversation
+    # Final step: Restore the main menu keyboard (Level 1)
+    await update.message.reply_text("Select another option:", reply_markup=MAIN_KEYBOARD)
+    
     context.user_data.clear()
     return ConversationHandler.END
+
 
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels the conversation (used for fallbacks)."""
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        await query.edit_message_text("Conversation cancelled.")
+    """Cancels the flow and restores the main menu (Level 1)."""
+    msg_text = "Conversation cancelled. Main menu restored."
+    
+    if update.message:
+        await update.message.reply_text(msg_text, reply_markup=MAIN_KEYBOARD)
     else:
-        await update.message.reply_text("Conversation cancelled.")
-        
+         # Fallback for unexpected update types during conversation
+        await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=MAIN_KEYBOARD)
+            
     context.user_data.clear()
     return ConversationHandler.END
 
 
-# --- STANDARD COMMAND HANDLERS (UNCHANGED) ---
+# --- STANDARD HANDLERS ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Greets the user and explains the bot."""
+    """Sends a welcome message and displays the Main Reply Keyboard (Level 1)."""
     await update.message.reply_markdown(
         "👋 Hello! I'm the **Uzbekistan AQI Bot**.\n\n"
-        "Use the **Menu button** (the `/` symbol) to access my main commands:\n"
-        "• `/regions` to choose a city for AQI data.\n"
-        "• `/mylocation` for **your current location**'s AQI."
+        "Please use the buttons below to check air quality.",
+        reply_markup=MAIN_KEYBOARD 
     )
-
-async def mylocation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Prompts the user to share their location using a custom keyboard."""
-    location_button = KeyboardButton(
-        text="📍 Share My Current Location",
-        request_location=True
-    )
-    reply_markup = ReplyKeyboardMarkup(
-        [[location_button]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await update.message.reply_text(
-        "Please tap the button below to share your current location so I can fetch the AQI data for the nearest station.",
-        reply_markup=reply_markup
-    )
+    context.user_data.clear() # Clear state on restart
+    return ConversationHandler.END
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receives location data and uses the coordinates to fetch AQI."""
+    """Handles the location object sent by the user (triggered by request_location=True)."""
     user_location = update.message.location
-    latitude = user_location.latitude
-    longitude = user_location.longitude
     
     await update.message.reply_text(
-        "Location received! Searching for the nearest AQI station...",
-        reply_markup=ReplyKeyboardRemove()
+        "📍 Location received! Searching for the nearest station...",
+        reply_markup=ReplyKeyboardRemove() 
     )
     
-    report_message = fetch_air_quality(latitude=latitude, longitude=longitude)
+    # UX: Show typing status
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
+    
+    # Call the ASYNC wrapper
+    report_message = await fetch_air_quality(
+        latitude=user_location.latitude, 
+        longitude=user_location.longitude
+    )
     
     await update.message.reply_markdown(report_message)
     
+    # Restore the main menu keyboard (Level 1)
+    await update.message.reply_text("Select another option:", reply_markup=MAIN_KEYBOARD)
+    
+    return ConversationHandler.END 
+
 async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Simple health check command for manual verification in Telegram."""
-    await update.message.reply_text("✅ Bot is running and ready to fetch AQI data.")
-    
+    """Responds with a simple message to confirm the bot is active."""
+    await update.message.reply_text("✅ Bot is running.")
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Log the error and notify the user."""
-    logger.error(f"Update '{update}' caused error '{context.error}'")
+    logger.error(f"Update caused error: {context.error}")
 
 
-# --- ASYNC SETUP FUNCTION (UNCHANGED) ---
+# --- SETUP & MAIN ---
+
 async def post_init_setup(application):
-    """Sets up the bot's menu commands using set_my_commands."""
-    logger.info("Setting Telegram Bot Menu Commands...")
-    
-    commands = [
-        BotCommand("regions", "Choose a region and city for AQI data"),
-        BotCommand("mylocation", "Get AQI for your current location"),
-    ]
-    
-    await application.bot.set_my_commands(commands)
-    logger.info("Bot Menu Commands successfully set.")
+    # Only keep /start visible in the menu. /health is removed as requested.
+    await application.bot.set_my_commands([
+        BotCommand("start", "Display Main Menu"),
+        # BotCommand("health", "Check bot status"), <-- Removed from menu
+    ])
 
-
-# --- Main Application Runner (UNCHANGED) ---
-def start():
-    """
-    Starts the bot in either Webhook (Production) or Polling (Local) mode.
-    """
-    load_dotenv()
-
+def main():
     if not TELEGRAM_TOKEN or not IQAIR_API_KEY:
-        logger.error(
-            "ERROR: The TELEGRAM_TOKEN or IQAIR_API_KEY environment variable is not set. Exiting."
-        )
+        logger.error("❌ ERROR: Tokens missing in environment variables.")
         sys.exit(1)
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init_setup).build()
 
-    # Define the Conversation Handler
+    # The conversation handler's entry point is the text from the 'Select Region' button (Level 1)
     region_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("regions", select_region)], 
-        
+        # Entry point: Catch the text message from the 'Select Region' button
+        entry_points=[MessageHandler(filters.Regex(f"^{BUTTON_REGIONS}$"), start_region_selection)], 
         states={
-            CHOOSING_CITY: [
-                CallbackQueryHandler(select_city, pattern='^state:'), 
-                CallbackQueryHandler(cancel_conversation, pattern='^cancel$'),
+            # CHOOSING_REGION (Level 2) waits for a REGION NAME or 'Back to Main Menu'
+            CHOOSING_REGION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, select_city),
             ],
-            
-            GETTING_AQI: [
-                # Handles City selection OR the Go Back button
-                CallbackQueryHandler(get_city_aqi), 
+            # CHOOSING_CITY (Level 3) waits for a CITY NAME or 'Back to Regions'
+            CHOOSING_CITY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_aqi_by_city_name), 
             ],
         },
-        
-        fallbacks=[CommandHandler("start", start_command), CommandHandler("cancel", cancel_conversation)],
+        fallbacks=[
+            # Handles /start command and general command cancellation at any point
+            CommandHandler("start", start_command), 
+            CommandHandler("cancel", cancel_conversation),
+            # General text fallback to cancel the conversation (outside of expected button text)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_conversation), 
+        ],
     )
     
-    # 3. Register handlers
+    # General Handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("mylocation", mylocation_command))
     application.add_handler(MessageHandler(filters.LOCATION, handle_location))
-    application.add_handler(CommandHandler("health", health_check))
+    application.add_handler(CommandHandler("health", health_check)) # Keeps command functional
     
+    # Add the Conversation Handler last (except for error handler)
     application.add_handler(region_conv_handler)
     application.add_error_handler(error_handler)
 
-    # 4. Run based on environment
     if WEBHOOK_URL:
-        logger.info(f"Setting Webhook to: {WEBHOOK_URL}/{TELEGRAM_TOKEN} on port {PORT}")
-        
+        logger.info(f"Starting Webhook on port {PORT}")
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TELEGRAM_TOKEN,
             webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
         )
-        logger.info(f"Bot started in **Webhook Mode** on port {PORT}. URL: {WEBHOOK_URL}")
     else:
-        logger.info("Bot started in **Polling Mode**. Send /regions or /mylocation in Telegram to test.")
-        application.run_polling(poll_interval=1.0)
+        logger.info("Starting Polling...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    start()
+    main()
