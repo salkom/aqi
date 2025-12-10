@@ -161,6 +161,19 @@ def start():
     application.add_handler(CommandHandler("health", health_check)) # Optional: useful for external checks
     application.add_error_handler(error_handler)
 
+    # 🛑 1. ADD A DEDICATED HEALTH CHECK HANDLER 🛑
+    # This handler will respond to a raw HTTP request at the /health path
+    # We use the telegram.ext.Application.update_queue to check for updates, 
+    # but more simply, we will just respond to the HTTP request itself.
+    
+    # In newer PTB versions, the most reliable way to check health is to use a 
+    # standard web framework or a dedicated check on the secret path.
+    
+    # A cleaner approach is to use the dedicated webserver portion of the Application
+    # by adding a dedicated path handler using the HTTP Handler class (not MessageHandler).
+    # Since adding an HTTP Handler requires more complex imports (like PTB's `HTTPHandler`),
+    # let's try the *simplest* path first by using the path argument in run_webhook:
+    
     # 4. Run based on environment
     if WEBHOOK_URL:
         # --- Production Mode (Render/Webhook) ---
@@ -174,6 +187,9 @@ def start():
             port=PORT,
             url_path=TELEGRAM_TOKEN, # Use the token as the path for security
             webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
+            # 🛑 2. ADD A HEALTH CHECK PATH 🛑
+            # We'll use a custom, public path for monitoring tools like UptimeRobot
+            health_check_path="/health",
         )
         logger.info(f"Bot started in **Webhook Mode** on port {PORT}. URL: {WEBHOOK_URL}")
     else:
