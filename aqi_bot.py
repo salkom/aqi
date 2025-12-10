@@ -1,25 +1,36 @@
 import requests
 import logging
 import os
+import sys
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from http import HTTPStatus
+from dotenv import load_dotenv
 
+# --- Configuration & Setup ---
 
-# --- Configuration (Load from Environment Variables) ---
-# NOTE: These variables must be set on the Render dashboard
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-IQAIR_API_KEY = os.environ.get("IQAIR_API_KEY")
+# Use Environment Variables for sensitive data and configuration
+# Get the Telegram Bot Token (required)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Render environment variables
-WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL") # This is automatically set by Render
-PORT = int(os.environ.get("PORT", 5000)) # Render often uses PORT 10000, but 5000 is a common default
+# Get the IQAir API Key (required)
+IQAIR_API_KEY = os.getenv("IQAIR_API_KEY")
+
+# Get the Webhook URL for production (optional, if present, webhook mode is used)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+# Get the port for the webhook server (Render usually sets this)
+PORT = int(os.getenv("PORT", "8080")) # Default to 8080 for local testing if not set
 
 # Tashkent location parameters for the IQAir API (Uzbekistan is the country)
 CITY = "Tashkent"
 STATE = "Toshkent Shahri" # IQAir often uses the region/state name
 COUNTRY = "Uzbekistan"
+
+# IQAir API Endpoint (Get city-specific data)
 BASE_URL = "http://api.airvisual.com/v2/city"
 
+# Basic Logging setup
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -30,7 +41,10 @@ logger = logging.getLogger(__name__)
 # --- AQI Fetching Function ---
 def fetch_air_quality():
     """Fetches air quality data for Tashkent from the IQAir API."""
-    # ... (Keep your existing fetch_air_quality function here) ...
+    if not IQAIR_API_KEY:
+        logger.error("IQAIR_API_KEY is not set.")
+        return "❌ IQAir API Key is missing. Cannot fetch data."
+
     try:
         # Define the query parameters for the API call
         params = {
@@ -48,8 +62,9 @@ def fetch_air_quality():
         
         # Check if the API returned an 'ok' status
         if data.get('status') != 'success':
-            logging.error(f"IQAir API Error: {data.get('data', 'Unknown API error')}")
-            return "❌ Error fetching data from the IQAir service."
+            error_message = data.get('data', 'Unknown API error')
+            logger.error(f"IQAir API Error: {error_message}")
+            return f"❌ Error fetching data from the IQAir service: *{error_message}*"
 
         # Extract relevant information
         current_data = data['data']['current']
@@ -71,12 +86,11 @@ def fetch_air_quality():
         return message
 
     except requests.exceptions.RequestException as e:
-        logging.error(f"HTTP Request Failed: {e}")
+        logger.error(f"HTTP Request Failed: {e}")
         return "❌ Network or API communication error."
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
+        logger.error(f"An unexpected error occurred: {e}")
         return "❌ An internal error occurred while processing the data."
-
 
 # --- AQI Description Logic (US Standard) ---
 def get_aqi_description(aqi):
@@ -94,8 +108,14 @@ def get_aqi_description(aqi):
     else: # 301+
         return {'level': '🟤 Hazardous', 'message': 'Health alert: everyone should avoid all outdoor exertion.'}
 
-
 # --- Telegram Command Handler ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Greets the user and explains the bot."""
+    await update.message.reply_markdown(
+        "👋 Hello! I'm the **Tashkent AQI Bot**.\n\n"
+        "Send the command `/aqi` to get the latest Air Quality Index (AQI) report for Tashkent."
+    )
+
 async def aqi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends the air quality report when the /aqi command is issued."""
     # Send a temporary message while fetching data
@@ -107,123 +127,56 @@ async def aqi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send the final report
     await update.message.reply_markdown(report_message)
 
+async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple health check endpoint for Render."""
+    await update.message.reply_text(str(HTTPStatus.OK))
+    
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log the error and notify the user."""
+    logger.error(f"Update '{update}' caused error '{context.error}'")
+
 
 # --- Main Application Runner ---
-def main():
-    """Builds the Application and returns it for Gunicorn to run."""
-    if not TELEGRAM_TOKEN or not IQAIR_API_KEY or not WEBHOOK_URL:
-        logger.error("Required environment variables are missing. Deployment will fail.")
-        # Return a dummy app or raise error, depending on production environment needs
-        return None
-    
+def start():
+    """
+    Starts the bot in either Webhook (Production) or Polling (Local) mode.
+    The mode is determined by the presence of the WEBHOOK_URL environment variable.
+    """
+    # Load environment variables from .env file for local development
+    load_dotenv()
+
+    # 1. Check for required keys
+    if not TELEGRAM_TOKEN or not IQAIR_API_KEY:
+        logger.error(
+            "ERROR: The TELEGRAM_TOKEN or IQAIR_API_KEY environment variable is not set. Exiting."
+        )
+        sys.exit(1)
+
+    # 2. Build the Application
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Register the command handler
+    # 3. Register handlers
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("aqi", aqi_command))
+    application.add_handler(CommandHandler("health", health_check)) # Optional: useful for external checks
+    application.add_error_handler(error_handler)
 
-    # --- Webhook Configuration ---
-    
-    # 1. Start the internal webserver on the specified port
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN, # Use the token as a secret path (e.g., /123456:ABC-DEF/ for updates)
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}" # The full URL Telegram needs to hit
-    )
-    
-    # In a typical Gunicorn setup, you would return the WSGI/ASGI app object here,
-    # but for simple PTB Webhook server, we let run_webhook handle the execution.
-    # We define 'app' for Gunicorn to target.
-    return application.updater.webserver
-
-
-# Create a variable 'app' which Gunicorn will look for.
-# In this specific case, we'll use a wrapper function that returns the result of main
-# to cleanly initialize the app when Gunicorn starts.
-def run_app():
-    # We call main to initialize and run the webhook server
-    return main()
-
-
-# Gunicorn expects an application object, but for this simple PTB setup, 
-# we let the script execute the webhook server directly via a runner script/Procfile. 
-# We'll rely on the Procfile for the actual execution command.
-
-# Define the application object for the Gunicorn worker process to use
-# We wrap the ApplicationBuilder in a simple callable target for Gunicorn
-
-def init_webhook_app():
-    """Initializes and returns the PTB Application instance for Gunicorn."""
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN environment variable is not set.")
-        return None
-        
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("aqi", aqi_command))
-
-    return application
-
-# The actual entry point for Gunicorn will be a separate script or the Procfile
-# which is why the main logic is slightly different from the polling setup.
-
-# Export the application object for external webserver integration (like gunicorn)
-application_instance = init_webhook_app()
-
-# --- Application Initialization for Gunicorn ---
-
-# Function to build and configure the PTB Application
-def build_application():
-    """Builds and returns the PTB Application instance."""
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN is not set. Cannot build application.")
-        return None
-
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("aqi", aqi_command))
-    
-    # We do NOT run run_webhook() here. We just return the application.
-    # The actual Webhook serving logic will be handled by the Runner below.
-    return application
-
-# The Application object Gunicorn is looking for (aqi_bot:app)
-application_instance = build_application()
-
-
-# Function to handle the actual running of the webhook
-# This will be used in the Procfile/Start Command instead of gunicorn targeting 'app'.
-def run_webhook_server():
-    """Builds the application and starts the webhook server."""
-    
-    # Reload environment variables for safety
-    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-    IQAIR_API_KEY = os.environ.get("IQAIR_API_KEY")
-    WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
-    PORT = int(os.environ.get("PORT", 5000))
-
-    if not all([TELEGRAM_TOKEN, IQAIR_API_KEY, WEBHOOK_URL]):
-        # This error check will now catch the missing token and provide a clean exit
-        logger.error("Required environment variables (TELEGRAM_TOKEN, IQAIR_API_KEY, or RENDER_EXTERNAL_URL) are missing.")
-        return
-
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("aqi", aqi_command))
-
-    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
-
-    logger.info(f"Starting webhook server on port {PORT}. Webhook URL: {webhook_url}")
-
-    # This is the PTB internal server. It handles the web serving and update processing.
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=webhook_url
-    )
-
-    # This function is the new entry point for Render.
-    pass
+    # 4. Run based on environment
+    if WEBHOOK_URL:
+        # --- Production Mode (Render/Webhook) ---
+        # Set the webhook to the external URL
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_TOKEN, # Use the token as the path for security
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
+            on_startup=lambda app: logger.info(f"Webhook set to {WEBHOOK_URL}/{TELEGRAM_TOKEN} on port {PORT}"),
+        )
+        logger.info(f"Bot started in **Webhook Mode** on port {PORT}. URL: {WEBHOOK_URL}")
+    else:
+        # --- Local Development Mode (Polling) ---
+        logger.info("Bot started in **Polling Mode**. Send /aqi in Telegram to test.")
+        application.run_polling(poll_interval=1.0) # Poll every 1 second
 
 if __name__ == '__main__':
-    # When Render executes 'python aqi_bot.py', this function runs.
-    run_webhook_server()
-
+    start()
