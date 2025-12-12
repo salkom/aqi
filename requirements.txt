@@ -1,6 +1,6 @@
-python-telegram-bot[webhooks]==22.5
+python-telegram-bot[webhooks]
+httpx
 python-dotenv
-sqlalchemy
+sqlalchemy[asyncio]
 asyncpg
-psycopg2-binary
 aiosqlite
