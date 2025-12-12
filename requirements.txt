@@ -1,3 +1,6 @@
 python-telegram-bot[webhooks]==22.5
-requests
 python-dotenv
+sqlalchemy
+asyncpg
+psycopg2-binary
+aiosqlite
